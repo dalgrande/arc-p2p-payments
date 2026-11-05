@@ -33,11 +33,12 @@ import { POST } from "@/app/api/webhooks/circle/route";
 const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
 const publicKeyBase64 = publicKey.export({ type: "spki", format: "der" }).toString("base64");
 
-function signed(rawBody: string, signWith = rawBody) {
+// A fresh key id per request by default, so the route's public-key cache never carries over between tests.
+function signed(rawBody: string, signWith = rawBody, keyId: string = crypto.randomUUID()) {
   const signature = crypto.createSign("SHA256").update(signWith).sign(privateKey).toString("base64");
   return new NextRequest("http://localhost/api/webhooks/circle", {
     method: "POST",
-    headers: { "x-circle-signature": signature, "x-circle-key-id": "key-1" },
+    headers: { "x-circle-signature": signature, "x-circle-key-id": keyId },
     body: rawBody,
   });
 }
@@ -101,6 +102,31 @@ describe("POST /api/webhooks/circle — authenticity", () => {
 
   it("answers 400 to a validly signed body that is not JSON", async () => {
     expect((await POST(signed("not json"))).status).toBe(400);
+  });
+
+  it("rejects a key id that is not a UUID without calling Circle", async () => {
+    const body = inbound();
+    expect((await POST(signed(body, body, "../../v1/w3s/wallets"))).status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(admin.from).not.toHaveBeenCalled();
+  });
+
+  it("fetches a key id's public key once and reuses it", async () => {
+    const keyId = crypto.randomUUID();
+    queueTables(admin, {});
+    await POST(signed(inbound({ state: "PENDING" }), undefined, keyId));
+    await POST(signed(inbound({ state: "PENDING" }), undefined, keyId));
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not cache a failed key fetch", async () => {
+    const keyId = crypto.randomUUID();
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 503 }));
+    const body = inbound({ state: "PENDING" });
+    expect((await POST(signed(body, body, keyId))).status).toBe(403);
+    queueTables(admin, {});
+    expect((await POST(signed(body, body, keyId))).status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });
 

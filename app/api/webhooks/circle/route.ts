@@ -385,13 +385,29 @@ async function verifyCircleSignature(
   }
 }
 
+// Circle key ids are UUIDs. Rejecting anything else keeps the header out of the outbound URL path.
+const KEY_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// A key id always maps to the same public key (per Circle's docs), so cache for the process lifetime.
+const publicKeyCache = new Map<string, string>();
+
 async function getCirclePublicKey(keyId: string): Promise<string> {
+  if (!KEY_ID_PATTERN.test(keyId)) {
+    throw new Error("Invalid Circle key id");
+  }
+
+  const cached = publicKeyCache.get(keyId);
+  if (cached) {
+    return cached;
+  }
+
   if (!process.env.CIRCLE_API_KEY) {
     throw new Error("Circle API key is not set");
   }
 
   const response = await fetch(
-    `https://api.circle.com/v2/notifications/publicKey/${keyId}`,
+    `https://api.circle.com/v2/notifications/publicKey/${encodeURIComponent(keyId)}`,
     {
       method: "GET",
       headers: {
@@ -406,9 +422,14 @@ async function getCirclePublicKey(keyId: string): Promise<string> {
   }
 
   const data = await response.json();
-  const rawPublicKey = data.data.publicKey;
+  const rawPublicKey = data?.data?.publicKey;
+  if (typeof rawPublicKey !== "string" || rawPublicKey.length === 0) {
+    throw new Error("Malformed public key response from Circle");
+  }
 
-  return `-----BEGIN PUBLIC KEY-----\n${rawPublicKey.match(/.{1,64}/g)?.join("\n")}\n-----END PUBLIC KEY-----`;
+  const pem = `-----BEGIN PUBLIC KEY-----\n${rawPublicKey.match(/.{1,64}/g)?.join("\n")}\n-----END PUBLIC KEY-----`;
+  publicKeyCache.set(keyId, pem);
+  return pem;
 }
 
 export async function POST(req: NextRequest) {
