@@ -119,14 +119,40 @@ describe("POST /api/webhooks/circle — authenticity", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it("does not cache a failed key fetch", async () => {
+  it("answers a failed key fetch with a retryable 503, then recovers on redelivery", async () => {
     const keyId = crypto.randomUUID();
     vi.mocked(fetch).mockResolvedValueOnce(new Response(null, { status: 503 }));
     const body = inbound({ state: "PENDING" });
-    expect((await POST(signed(body, body, keyId))).status).toBe(403);
+    expect((await POST(signed(body, body, keyId))).status).toBe(503);
     queueTables(admin, {});
     expect((await POST(signed(body, body, keyId))).status).toBe(200);
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([{ data: {} }, { data: { publicKey: "" } }, { data: { publicKey: "bm90IGEga2V5" } }])(
+    "does not trust or cache a malformed key response %j",
+    async (payload) => {
+      const keyId = crypto.randomUUID();
+      vi.mocked(fetch).mockResolvedValueOnce(Response.json(payload));
+      const body = inbound({ state: "PENDING" });
+      expect((await POST(signed(body, body, keyId))).status).toBe(503);
+      queueTables(admin, {});
+      expect((await POST(signed(body, body, keyId))).status).toBe(200);
+      expect(fetch).toHaveBeenCalledTimes(2);
+    }
+  );
+
+  it("shares one key fetch across concurrent requests and key id casing", async () => {
+    const keyId = crypto.randomUUID();
+    queueTables(admin, {});
+    const body = inbound({ state: "PENDING" });
+    const statuses = await Promise.all([
+      POST(signed(body, body, keyId)),
+      POST(signed(body, body, keyId.toUpperCase())),
+      POST(signed(body, body, keyId)),
+    ]);
+    expect(statuses.map((res) => res.status)).toEqual([200, 200, 200]);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 
